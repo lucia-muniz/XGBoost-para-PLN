@@ -1,0 +1,380 @@
+---
+title: "XGBoost PLN"
+author: 'Lucía Muñiz Presno'
+date: "2025-11-28"
+output: html_document
+---
+
+
+```{r}
+# Cargar datos  
+library(dplyr)
+
+Dataset <- IMDB_Dataset
+set.seed(123)
+datos <- sample_n(Dataset, 2000)
+
+names(datos)
+head(datos)
+
+datos$sentiment <- factor(datos$sentiment)
+```
+
+# 2. Limpieza de datos
+
+## Preparación del corpus: 
+Primero usaremos el comando VectorSource para decirle a la función Corpus que cada documento (review) es una entrada en el vector.
+
+```{r}
+library(tm)
+corpus = VCorpus(VectorSource(datos$review))
+inspect(corpus[1:3])
+
+```
+## Limpieza del corpus:
+
+En este apartado, se define una función, a la que hemos llamado clean_corpus que toma el vector de los textos de la base de datos y estandariza los datos, para que el modelo cuente como las mísmas palabras, palabras que tengan algún cracter diferente (una con letra inicial mayúscula, y otra con minúsculas…) pero que realmente representen el mismo término.
+
+Las transformaciones que se han realizado son las siguientes: conversión a minúsculas, eliminar números, eliminar signos de puntuación, eliminar stopwords (palabras no relevantes para la predicción de la clase como el o las) y espacios extras.
+
+Hacer esto es esencial antes de cualquier análisis de texto o modelado de texto, ya que reduce el ruido y normaliza los datos, evitando que palabras irrelevantes afecten al modelo. 
+
+```{r}
+
+clean_corpus <- tm_map(corpus, content_transformer(tolower))
+
+#quitamos numeros
+clean_corpus <- tm_map(clean_corpus, removeNumbers)
+
+#quitamos signos de puntuacion
+clean_corpus <- tm_map(clean_corpus, removePunctuation)
+
+#quitamos stopwords
+stopwords("english")[1:50]
+clean_corpus <- tm_map(clean_corpus, removeWords, stopwords("english"))
+
+#quitamos exceso de espacios blancos
+clean_corpus<- tm_map(clean_corpus, stripWhitespace)
+
+```
+Además, después de un primer análisis exploratorio, se observó que las palabras más repetidas en ambas categorias eran palabras genéricas en una review como movie, film o one. Al aparecer tanto indiferentemente del sentimiento, pueden contaminar el modelo y dejar de aportar información útil. Por ese motivo, vamos a añadir un nuevo filtro que elimine estos términos del corpus.
+
+Esta limpieza puede mejorar la capacidad del clasificador para distinguir las clases, incrementando la precisión y haciendo las nubes de palabras más representativas.
+
+```{r}
+custom_stopwords <- c("movie", "film", "one")
+
+clean_corpus <- tm_map(clean_corpus, removeWords, custom_stopwords)
+```
+
+
+# 3. Visualización de los datos (nubes de palabras):
+
+Vamos a utilizar la visualización mediante nubes de palabras para ayudarnos a entender las diferencias en el uso de palabras entre las reviews positivas y negativas.
+
+Primero obtenemos los índices de los artículos de cada tipo:
+
+```{r}
+positive_indices <- which(datos$sentiment == "positive")
+positive_indices[1:5]  # Mostrar solo los primeros 5 índices
+
+negative_indices <- which(datos$sentiment == "negative")
+
+```
+Ahora vemos las palabras más frecuentes en todas las clases de artículos. Como nuestra base de datos es grande y tiene muchas palabras, vamos a seleccionar las que ocurren por lo menos 50 veces.
+
+## Reviews positivas:
+```{r}
+par(mar = c(0,0,0,0))
+library(wordcloud)
+
+wordcloud(clean_corpus[positive_indices], min.freq = 50, max.words = 50, scale = c(2, 0.5))
+```
+## Reviews negativas:
+```{r}
+wordcloud(clean_corpus[negative_indices], min.freq = 50, max.words = 50, scale = c(2, 0.5))
+```
+
+# 4. Crear Train y test set:
+
+Dividimos el conjunto de datos en una parte para entrenar y otra para validar el modelo.
+En este caso, usamos 75% de los datos para entrenamiento y los restantes para test.
+
+```{r}
+set.seed(123)
+
+nobs = dim(datos)[1]
+train = 1:round(nobs * 0.75)
+test = (round(nobs * 0.75) + 1):nobs
+rv_train = datos[train, ]
+rv_test = datos[test, ]
+```
+
+y el corpus limpio:
+```{r}
+corpus_train = clean_corpus[train]
+corpus_test = clean_corpus[test]
+
+```
+
+
+
+# 5. Identificación de palabras frecuentes
+
+## Cálculo de la frecuencia de términos
+Creamos una matriz documento-término (DTM) donde cada fila representa un documento (review) y cada columna una palabra. El objetivo es cálcular la frecuencia de cada término.
+
+
+Para esto, se filtran términos que aparecen al menos 5 veces en todo el corpus para reducir dimensionalidad, y se crea la DTM final solo con estos términos frecuentes.
+
+Esto se hace para reducir ruido y complejidad, ya que palabras que aparecen muy pocas veces no aportan información significativa y pueden aumentar el riesgo de overfitting.
+
+Es un paso imprescindible del modelado ya que la DTM es la representación numérica que XGBoost (además de otros modelos) necesita para entrenar.
+
+
+```{r}
+
+rv_dtm_full = DocumentTermMatrix(clean_corpus)
+
+freq_terms <- findFreqTerms(rv_dtm_full, lowfreq = 5)
+
+
+rv_dtm_train <- DocumentTermMatrix(
+  corpus_train,
+  control = list(dictionary = freq_terms)
+)
+inspect(rv_dtm_train[1:5, 5:10])
+
+
+
+rv_dtm_test = DocumentTermMatrix(
+  corpus_test,
+  control = list(dictionary = freq_terms)
+)
+
+```
+
+## Convertir la información de los recuentos a Si o No
+
+El clasificador para el Naive Bayes necesita la información de presencia o ausencia de palabras y no de recuentos. Por eso vamos a construir una nueva matriz que convierta las frecuencias anteriores en factores, de forma que cuando la frecuencia era igual a 0 la nueva matriz mostrará un No, mientras que para una frecuencia diferente de 0, mostrará un Sí. 
+
+```{r}
+convert_count = function(x) {
+y = ifelse(x > 0, 1, 0)
+y = factor(y, levels = c(0, 1), labels = c("No", "Si"))
+y
+}
+
+rv_dtm_train_SN = apply(rv_dtm_train, 2, convert_count)
+rv_dtm_train_SN[1:5, 5:10]
+
+rv_dtm_test_SN = apply(rv_dtm_test, 2, convert_count)
+```
+
+En estas representaciones de las frecuencias podemos comprobar como ambas matrices coinciden de forma que como hemos dicho antes, los 0 se convierten en No y los 1 se convierten en Sí. 
+
+
+
+
+# 7. XGBOOST
+
+Para XGB necesitamos una matriz numérica (idealmente dispersa) con recuentos.
+```{r}
+library(Matrix)
+library(xgboost)
+library(caret)
+
+rv_dtm_train_counts <- as.matrix(rv_dtm_train) * 1.0  
+rv_dtm_test_counts  <- as.matrix(rv_dtm_test)  * 1.0
+
+# Convertir a formato disperso eficiente 
+X_train <- Matrix(rv_dtm_train_counts, sparse = TRUE)
+X_test  <- Matrix(rv_dtm_test_counts,  sparse = TRUE)
+```
+
+Etiquetas binarias 0/1 para XGBoost
+En IMDB, 'positive'/'negative'. Escogemos 1 = positive, 0 = negative
+```{r}
+y_train <- ifelse(rv_train$sentiment == "positive", 1L, 0L)
+y_test  <- ifelse(rv_test$sentiment  == "positive", 1L, 0L)
+
+dtrain <- xgb.DMatrix(data = X_train, label = y_train)
+dtest  <- xgb.DMatrix(data = X_test,  label = y_test)
+```
+
+## Codificación de las categorías 
+
+Ahora, ya que XGBoost espera etiquetas numéricas en problemas de clasificación debemos convertir la variable sentimiento (sentiment) en números enteros desde el 0 hasta el número de clases que haya en el dataset. En este caso usaremos hasta el 1 ya que solo hay dos categorías.
+
+```{r}
+y_int <- as.integer(factor(datos$sentiment)) - 1
+all_levels <- levels(factor(datos$sentiment))
+num_class <- length(all_levels)
+```
+
+## Búsqueda de hiperparámetros
+
+Ahora vamos a definir un grid de combinaciones de los hiperparámetros que usará nuestro modelo (eta, max_depth, subsample, colsample_bytree).
+Los hiperparámetros controlan la complejidad y regularización del modelo, por lo que es imprescindible escoger los que nos permitan hacer las mejores predicciones. 
+En este caso hemos decidido buscar los hiperparametros que minimicen el logaritmo de pérdida (mlogloss) en los datos de la validación cruzada.
+La razón por la que hemos usado mlogloss en vez de accuracy como métrica para nuestro modelo es que accuracy indica el porcentaje de predicciones correctas, sin tener en cuenta como de confiable es cada predicción. Esto puede ser problemático, especialmente cuando las clases están desbalanceadas, aunque en nuestro caso este no es un problema.
+Por otro lado, mlogloss evalúa la probabilidad que el modelo asigna a cada clase, cosa  que trae como ventajas: penaliza más fuertemente los errores cuando el modelo está muy seguro de una predicción incorrecta, creando predicciones más confiables, además, permite que el modelo aprenda probabilidades realistas, no solo cuál clase tiene más votos, lo que ayuda a calibrar mejor las predicciones.
+
+En resumen, hemos preferido usar mloggloss antes que accuracy ya que buscamos una evaluación más precisa del desempeño real del modelo. A diferencia de la accuracy, mlogloss refleja tanto la precisión como la confianza de las predicciones, ayudando a evitar sobreajuste y a generar probabilidades más fiables.
+
+Seguidamente insertaremos una tabla con una breve descripción de que hace cada parámetro y que valores hemos probado. 
+
+```{r}
+library(knitr)
+
+tabla_params <- data.frame(
+Hiperparámetro   = c("eta", "max_depth", "subsample", "colsample_bytree"),
+`Qué hace`       = c(
+"Tasa de aprendizaje (más baja = más estable)",
+"Profundidad de los árboles (más alto = más complejo)",
+"Fracción de filas usadas en cada árbol",
+"Fracción de columnas usadas en cada árbol"
+),
+`Valores probados` = c(
+"0.05, 0.1, 0.15, 0.2, 0.25, 0.3",
+"3, 4, 5, 6, 7, 8",
+"0.6, 0.8, 1.0",
+"0.6, 0.8, 1.0"
+),
+check.names = FALSE
+)
+
+kable(tabla_params, format = "latex", booktabs = TRUE,
+caption = "Hiperparámetros de XGBoost: descripción y valores probados") 
+
+```
+
+
+```{r}
+param_grid <- expand.grid(
+  eta = seq(0.05, 0.3, by = 0.05),
+  max_depth = 3:8,
+  subsample = seq(0.6, 1, by = 0.2),
+  colsample_bytree = seq(0.6, 1, by = 0.2)
+)
+```
+
+# Validación cruzada 
+
+Este método entrena un modelo con 5-fold CV para cada combinación de hiperparámetros, deteniendose temprano si no hay mejora.
+Esto sirve para evaluar el rendimiento de una manera robusta y evitar overfitting.
+La 5-fold Cross-Validation selecciona la combinación de hiperparámetros que minimice el error de validación.
+
+```{r}
+results <- data.frame()
+
+for (i in 1:nrow(param_grid)) {
+  params <- param_grid[i, ]
+  
+  cv <- xgb.cv(
+    params = list(
+      objective = "multi:softprob",
+      eval_metric = "mlogloss",
+      num_class = num_class,
+      eta = params$eta,
+      max_depth = params$max_depth,
+      subsample = params$subsample,
+      colsample_bytree = params$colsample_bytree
+    ),
+    data = dtrain,
+    nrounds = 200,
+    nfold = 5,
+    verbose = 0,
+    early_stopping_rounds = 15
+  )
+  
+  best_mlogloss <- min(cv$evaluation_log$test_mlogloss_mean)
+  results <- rbind(results, cbind(params, cv_mlogloss = best_mlogloss))
+  
+  cat(sprintf("(%d/%d) eta=%.2f, depth=%d, subsample=%.2f, colsample=%.2f -> mlogloss=%.4f\n",
+              i, nrow(param_grid), params$eta, params$max_depth,
+              params$subsample, params$colsample_bytree, best_mlogloss))
+  
+}
+```
+
+## Seleccionar mejores hiperparámetros
+
+Se ordenan los resultados por mlogloss y se selecciona la mejor combinación, que minimice este valor para entrenar el modelo final con los hiperparámetros óptimos, y asegurarnos de que el modelo final tenga el mejor rendimiento en validación (test set).
+```{r}
+results <- results[order(results$cv_mlogloss), ]
+best_params <- results[1, ]
+print("Mejor combinación encontrada:")
+print(best_params)
+```
+
+## Entrenar modelo final con mejores parámetros
+
+```{r}
+bst_final <- xgb.train(
+  params = list(
+    objective = "multi:softprob",
+    eval_metric = "mlogloss",
+    num_class = num_class,
+    eta = best_params$eta,
+    max_depth = best_params$max_depth,
+    subsample = best_params$subsample,
+    colsample_bytree = best_params$colsample_bytree
+  ),
+  data = dtrain,
+  nrounds = 300,
+  watchlist = list(train = dtrain, test = dtest),
+  early_stopping_rounds = 20,
+  print_every_n = 10
+)
+```
+Aquí podemos ver algunos de los resultados del mlogloss tanto en el test como en el train, para comprobar que no se este produciendo overfitting en caso de que el train set tenga un valor muy bajo y el test set tenga un valor considerablemente mas alto. 
+La combinación de hiperparámetros que minimiza el mlogloss, da un mloglodd de 0.3992817 en el test set, así que como ya hemos dicho previamente será la que utilicemos para entrenar el modelo final. En la primera tabla podemos ver cual es esta combinación de hiperparámetros óptimos. 
+
+
+Aunque se use cross-validation dentro del conjunto de entrenamiento para ajustar hiperparámetros, todavía necesitamos un conjunto de prueba final independiente, ya que cross-validation solo nos da una buena estimación de rendimiento dentro de los datos de entrenamiento, y es necesario un conjunto que sirva para evaluar la capacidad del modelo para predecir datos totalmente nuevos.
+
+En otras palabras, CV ayuda a optimizar el modelo, mientras que el conjunto de prueba permite validar de manera objetiva ese modelo optimizado.
+
+
+## Predicciones y evaluación
+
+Finalmente, se predicen probabilidades para cada clase, se asigna la clase con mayor probabilidad, se construye la matriz de confusión y se calcula la exactitud.
+Esto sirve para medir el desempeño real del modelo y permite ver qué tan bien clasifica cada categoría y la proporción de aciertos global.
+```{r}
+pred_prob_vec <- predict(bst_final, X_test)
+pred_prob_mat <- matrix(pred_prob_vec, ncol = num_class, byrow = TRUE)
+preds <- max.col(pred_prob_mat, ties.method = "first") - 1
+
+conf_mat <- table(
+  Pred = factor(preds, levels = 0:(num_class-1), labels = all_levels),
+  True = factor(y_test, levels = 0:(num_class-1), labels = all_levels)
+)
+print("Matriz de confusión:")
+print(conf_mat)
+
+accuracy <- sum(diag(conf_mat)) / sum(conf_mat)
+cat(sprintf("Accuracy en test: %.4f\n", accuracy))
+```
+Analizando la matriz de confusión del test set comprobamos que hay 193 negativos correctamente clasificados como negativos (verdaderos negativos), 210 positivos correctamente clasificados como positivos (verdaderos positivos), 62 positivos clasificados como negativos (falsos negativos) y 35 negativos clasificados como positivos (falsos positivos). 
+
+Esto muestra que el modelo acierta en la mayoría de los casos, aunque se equivoca un más con los falsos negativos, en este tipo de problema en concreto no tenemos especial interés en minimizar uno de los errores a costa del otro ya que tanto clasificar una reseña positiva como negativa de forma incorrecta, como el caso inverso, tienen consecuencias similares. 
+
+La accuracy del 80.6 % significa que de cada 100 reseñas, 80 fueron clasificadas correctamente. Para un primer modelo con texto crudo y sin ajuste profundo, este resultado es bastante razonable.
+
+
+## Importancia de términos
+
+Finalmente, obtenemos la importancia de cada término en la predicción del modelo, con el fin de interpretar qué palabras tienen mayor impacto en la clasificación.
+```{r}
+importance_matrix <- xgb.importance(model = bst_final, feature_names = colnames(X_train))
+print(head(importance_matrix, 20))
+```
+
+El análisis de la importancia de las características nos muestra que las palabras que más influyen en la clasificación son las que tienen una significado positivo o negativo, como “waste”, “bad”, “worst” o “best”. Estas palabras tienen valores elevados de Gain, lo que indica que contribuyen en gran medida a la reducción de la pérdida durante el entrenamiento. Por otro lado, términos más neutros, como “film” o “also”, aparecen con mayor frecuencia pero tienen un menor poder para categorizar los textos. Este patrón es bastante lógico, ya que en problemas de análisis de sentimientos son precisamente las palabras polarizadas las que dan la información más útil para diferenciar entre clases.
+
+Como conclusión de este modelo, se alcanzó una precisión del 77 % en el conjunto de prueba, con una distribución equilibrada de falsos positivos y falsos negativos, lo que indica una buena capacidad de generalización sin sesgos claros hacia una clase. Además, el análisis de importancia de variables mostró que las palabras más relevantes para la clasificación son aquellas con carga semántica polarizada, como “waste”, “bad”, “worst” o “best”, coherente con la naturaleza del problema.
+
+No obstante, existen diversas estrategias para mejorar el desempeño del modelo. Entre ellas podemos encontrar el uso de n-gramas (bigramas o trigramas) para capturar dependencias contextuales, la ponderación TF-IDF para reducir el impacto de palabras muy frecuentes pero poco informativas, la optimización más exhaustiva de hiperparámetros, o incluso la aplicación de modelos más avanzados basados en representaciones semánticas profundas (por ejemplo, BERT o embeddings preentrenados).
+
+En conjunto, los resultados obtenidos demuestran que XGBoost es una herramienta potente y competitiva para tareas de clasificación de texto, especialmente cuando se combina con una adecuada preparación de datos y una selección cuidadosa de hiperparámetros. Este enfoque ofrece un equilibrio entre interpretabilidad, rendimiento y coste computacional, sirviendo como una base sólida para el desarrollo de modelos más complejos en futuras etapas.

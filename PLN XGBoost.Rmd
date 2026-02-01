@@ -154,29 +154,10 @@ rv_dtm_test = DocumentTermMatrix(
 
 ```
 
-## Convertir la información de los recuentos a Si o No
-
-El clasificador para el Naive Bayes necesita la información de presencia o ausencia de palabras y no de recuentos. Por eso vamos a construir una nueva matriz que convierta las frecuencias anteriores en factores, de forma que cuando la frecuencia era igual a 0 la nueva matriz mostrará un No, mientras que para una frecuencia diferente de 0, mostrará un Sí. 
-
-```{r}
-convert_count = function(x) {
-y = ifelse(x > 0, 1, 0)
-y = factor(y, levels = c(0, 1), labels = c("No", "Si"))
-y
-}
-
-rv_dtm_train_SN = apply(rv_dtm_train, 2, convert_count)
-rv_dtm_train_SN[1:5, 5:10]
-
-rv_dtm_test_SN = apply(rv_dtm_test, 2, convert_count)
-```
-
-En estas representaciones de las frecuencias podemos comprobar como ambas matrices coinciden de forma que como hemos dicho antes, los 0 se convierten en No y los 1 se convierten en Sí. 
 
 
 
-
-# 7. XGBOOST
+# 6. XGBOOST
 
 Para XGB necesitamos una matriz numérica (idealmente dispersa) con recuentos.
 ```{r}
@@ -376,5 +357,6 @@ El análisis de la importancia de las características nos muestra que las palab
 Como conclusión de este modelo, se alcanzó una precisión del 77 % en el conjunto de prueba, con una distribución equilibrada de falsos positivos y falsos negativos, lo que indica una buena capacidad de generalización sin sesgos claros hacia una clase. Además, el análisis de importancia de variables mostró que las palabras más relevantes para la clasificación son aquellas con carga semántica polarizada, como “waste”, “bad”, “worst” o “best”, coherente con la naturaleza del problema.
 
 No obstante, existen diversas estrategias para mejorar el desempeño del modelo. Entre ellas podemos encontrar el uso de n-gramas (bigramas o trigramas) para capturar dependencias contextuales, la ponderación TF-IDF para reducir el impacto de palabras muy frecuentes pero poco informativas, la optimización más exhaustiva de hiperparámetros, o incluso la aplicación de modelos más avanzados basados en representaciones semánticas profundas (por ejemplo, BERT o embeddings preentrenados).
+
 
 En conjunto, los resultados obtenidos demuestran que XGBoost es una herramienta potente y competitiva para tareas de clasificación de texto, especialmente cuando se combina con una adecuada preparación de datos y una selección cuidadosa de hiperparámetros. Este enfoque ofrece un equilibrio entre interpretabilidad, rendimiento y coste computacional, sirviendo como una base sólida para el desarrollo de modelos más complejos en futuras etapas.

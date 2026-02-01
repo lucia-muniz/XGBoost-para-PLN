@@ -53,4 +53,3 @@ El trabajo cubre todo el pipeline de Procesamiento del Lenguaje Natural (PLN), d
 
 **Lucía Muñiz Presno**  
 Grado en Estadística y Empresa  
-Intereses: Data Science, Machine Learning, PLN, Big Data
